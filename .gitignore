@@ -16,3 +16,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local reference material
+loan-approval-classification.pdf

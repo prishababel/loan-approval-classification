@@ -4,8 +4,9 @@ Run locally:
     streamlit run streamlit_app.py
 
 The app loads the trained pipeline from models/model.joblib (produced by
-`python -m loan_approval.train`) and serves three views: an interactive
-prediction form, the model comparison report, and a dataset explorer.
+`python -m loan_approval.train`) and serves four views: an interactive
+prediction form, the model comparison report, the fairness analysis, and a
+dataset explorer.
 """
 
 import sys
@@ -25,9 +26,10 @@ from loan_approval import config  # noqa: E402
 BLUE = "#2a78d6"
 ORANGE = "#eb6834"
 AQUA = "#1baf7a"
+YELLOW = "#eda100"
 GOOD = "#0ca30c"
 CRITICAL = "#d03b3b"
-SERIES_3 = [BLUE, ORANGE, AQUA]
+SERIES = [BLUE, ORANGE, AQUA, YELLOW]
 
 st.set_page_config(page_title="Loan Approval Predictor", page_icon="🏦", layout="wide")
 
@@ -54,7 +56,9 @@ def predict_tab(model, metrics: dict) -> None:
     st.subheader("Check a loan application")
     st.caption(
         f"Predictions come from the best model in training "
-        f"({metrics['best_model']}, test ROC-AUC {metrics['models'][metrics['best_model']]['roc_auc']:.3f})."
+        f"({metrics['best_model']}, test ROC-AUC {metrics['models'][metrics['best_model']]['roc_auc']:.3f}). "
+        "The interest rate is deliberately not an input — it is set after the "
+        "approval decision, so using it would leak the answer."
     )
 
     with st.form("application"):
@@ -62,18 +66,17 @@ def predict_tab(model, metrics: dict) -> None:
 
         with person_col:
             st.markdown("**Applicant**")
-            age = st.number_input("Age", min_value=18, max_value=config.MAX_AGE, value=30)
+            age = st.number_input("Age", min_value=18, max_value=100, value=30)
             gender = st.selectbox("Gender", config.CATEGORY_OPTIONS["person_gender"])
             education = st.selectbox("Education", config.CATEGORY_OPTIONS["person_education"], index=2)
-            income = st.number_input("Annual income ($)", min_value=1_000, max_value=5_000_000, value=60_000, step=1_000)
-            emp_exp = st.number_input("Employment experience (years)", min_value=0, max_value=config.MAX_EMP_EXP, value=5)
+            income = st.number_input("Annual income ($)", min_value=1_000, max_value=1_000_000, value=60_000, step=1_000)
+            emp_exp = st.number_input("Employment experience (years)", min_value=0, max_value=80, value=5)
             home = st.selectbox("Home ownership", config.CATEGORY_OPTIONS["person_home_ownership"])
 
         with loan_col:
             st.markdown("**Loan**")
             amount = st.number_input("Loan amount ($)", min_value=500, max_value=100_000, value=10_000, step=500)
             intent = st.selectbox("Loan intent", config.CATEGORY_OPTIONS["loan_intent"])
-            rate = st.number_input("Interest rate (%)", min_value=1.0, max_value=25.0, value=11.0, step=0.1)
             credit_score = st.number_input("Credit score", min_value=300, max_value=850, value=630)
             hist_len = st.number_input("Credit history length (years)", min_value=0, max_value=40, value=4)
             defaults = st.selectbox(
@@ -95,7 +98,6 @@ def predict_tab(model, metrics: dict) -> None:
                 "person_income": float(income),
                 "person_emp_exp": int(emp_exp),
                 "loan_amnt": float(amount),
-                "loan_int_rate": float(rate),
                 "loan_percent_income": percent_income,
                 "cb_person_cred_hist_length": float(hist_len),
                 "credit_score": int(credit_score),
@@ -136,8 +138,11 @@ def performance_tab(metrics: dict) -> None:
     m2.metric("ROC-AUC", f"{best_metrics['roc_auc']:.4f}")
     m3.metric("Accuracy", f"{best_metrics['accuracy']:.4f}")
     m4.metric("F1 score", f"{best_metrics['f1']:.4f}")
+    tuning = metrics["tuning"]
     st.caption(
         f"Hold-out test set: {metrics['n_test']:,} loans ({metrics['n_train']:,} used for training). "
+        f"Tuned Logistic Regression grid search picked {tuning['best_params']} "
+        f"(cross-validated F1 {tuning['cv_f1']:.3f}). "
         f"Trained {metrics['trained_at']} · scikit-learn {metrics['sklearn_version']}."
     )
 
@@ -186,8 +191,8 @@ def performance_tab(metrics: dict) -> None:
                 y=alt.Y("True positive rate", scale=alt.Scale(domain=[0, 1])),
                 color=alt.Color(
                     "Model",
-                    scale=alt.Scale(domain=model_order, range=SERIES_3[: len(model_order)]),
-                    legend=alt.Legend(orient="bottom"),
+                    scale=alt.Scale(domain=model_order, range=SERIES[: len(model_order)]),
+                    legend=alt.Legend(orient="bottom", columns=2),
                 ),
                 tooltip=["Model", "False positive rate", "True positive rate"],
             )
@@ -205,6 +210,94 @@ def performance_tab(metrics: dict) -> None:
         st.dataframe(cm_df.style.format("{:,}"), use_container_width=True)
         st.caption("Rows are the true outcome; columns are the model's prediction.")
 
+        ablation = metrics["demographics_ablation"]
+        st.markdown("**Do demographics matter? (ablation)**")
+        ab_df = pd.DataFrame(
+            {
+                "With demographics": ablation["with"],
+                "Without demographics": {k: ablation["without"][k] for k in ablation["with"]},
+            }
+        )
+        ab_df["Difference"] = ab_df["Without demographics"] - ab_df["With demographics"]
+        st.dataframe(ab_df.style.format("{:+.4f}", subset=["Difference"]).format("{:.4f}", subset=ab_df.columns[:2]), use_container_width=True)
+        st.caption(
+            "Tuned Logistic Regression retrained without gender, age, or education: "
+            "metrics barely move, so approval decisions are driven by financial features."
+        )
+
+
+def fairness_tab(metrics: dict) -> None:
+    st.subheader("Fairness analysis")
+    model_names = list(metrics["fairness"].keys())
+    model_name = model_names[0] if len(model_names) == 1 else st.radio(
+        "Model", model_names, horizontal=True
+    )
+    report = metrics["fairness"][model_name]
+
+    st.caption(
+        "Group-level behavior on the hold-out test set. Demographic-parity gap = spread in "
+        "predicted approval rates between groups; equal-opportunity gap = spread in true-positive "
+        "rates (how often genuinely approvable applicants are approved)."
+    )
+
+    for dim, title in [("person_gender", "By gender"), ("age_band", "By age band")]:
+        block = report[dim]
+        st.markdown(f"**{title}**")
+
+        rows = pd.DataFrame(block["groups"]).T
+        rows.index.name = "Group"
+        rows = rows.rename(
+            columns={
+                "n": "Applicants",
+                "actual_approval_rate": "Actual approval",
+                "predicted_approval_rate": "Predicted approval",
+                "accuracy": "Accuracy",
+                "tpr": "TPR",
+                "fpr": "FPR",
+                "precision": "Precision",
+            }
+        )
+        if dim == "age_band":
+            order = [b[0] for b in config.AGE_BANDS if b[0] in rows.index]
+            rows = rows.loc[order]
+
+        table_col, chart_col = st.columns([3, 2])
+        with table_col:
+            pct_cols = [c for c in rows.columns if c != "Applicants"]
+            st.dataframe(
+                rows.style.format("{:.1%}", subset=pct_cols, na_rep="—").format("{:,.0f}", subset=["Applicants"]),
+                use_container_width=True,
+            )
+            g1, g2 = st.columns(2)
+            g1.metric("Demographic-parity gap", f"{block['demographic_parity_gap']:.1%}")
+            g2.metric("Equal-opportunity gap", f"{block['equal_opportunity_gap']:.1%}")
+        with chart_col:
+            chart_df = rows.reset_index()[["Group", "Actual approval", "Predicted approval"]].melt(
+                id_vars="Group", var_name="Rate", value_name="value"
+            )
+            chart = (
+                alt.Chart(chart_df)
+                .mark_bar(cornerRadiusTopLeft=2, cornerRadiusTopRight=2)
+                .encode(
+                    x=alt.X("Group", sort=list(rows.index), title=None),
+                    xOffset="Rate",
+                    y=alt.Y("value", axis=alt.Axis(format="%"), title="Approval rate"),
+                    color=alt.Color(
+                        "Rate",
+                        scale=alt.Scale(domain=["Actual approval", "Predicted approval"], range=[BLUE, ORANGE]),
+                        legend=alt.Legend(orient="bottom"),
+                    ),
+                    tooltip=["Group", "Rate", alt.Tooltip("value", format=".1%")],
+                )
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+    st.info(
+        "The dominant predictor is **previous loan defaults on file** — no applicant with a prior "
+        "default is approved in this dataset. Demographic features carry almost no weight (see the "
+        "ablation in Model performance), which is what the small gaps above reflect."
+    )
+
 
 def explorer_tab(df: pd.DataFrame) -> None:
     st.subheader("Dataset explorer")
@@ -220,7 +313,7 @@ def explorer_tab(df: pd.DataFrame) -> None:
     hist_col, rate_col = st.columns(2)
 
     with hist_col:
-        feature = st.selectbox("Distribution of…", config.NUMERIC_FEATURES, index=7)
+        feature = st.selectbox("Distribution of…", config.NUMERIC_FEATURES, index=6)
         split = st.checkbox("Split by outcome", value=False)
         base = df[[feature]].assign(Outcome=outcome)
         if split:
@@ -277,8 +370,9 @@ def explorer_tab(df: pd.DataFrame) -> None:
 def main() -> None:
     st.title("🏦 Loan Approval Predictor")
     st.caption(
-        "Machine-learning demo trained on 45,000 loan applications. "
-        "Educational project — not financial advice."
+        "Machine-learning demo trained on 45,000 loan applications, based on the team notebook "
+        "“Beyond the Credit Score” (Prisha Babel, Chad Rampersad, Dedeepya Pidaparthi, Brocatto200, "
+        "Nishat, Samuel Oyekan). Educational project — not financial advice."
     )
 
     if not config.MODEL_PATH.exists() or not config.METRICS_PATH.exists():
@@ -292,13 +386,15 @@ def main() -> None:
     metrics = load_metrics()
     df = load_data()
 
-    tab_predict, tab_perf, tab_data = st.tabs(
-        ["🔮 Predict", "📊 Model performance", "🗂️ Data explorer"]
+    tab_predict, tab_perf, tab_fair, tab_data = st.tabs(
+        ["🔮 Predict", "📊 Model performance", "⚖️ Fairness", "🗂️ Data explorer"]
     )
     with tab_predict:
         predict_tab(model, metrics)
     with tab_perf:
         performance_tab(metrics)
+    with tab_fair:
+        fairness_tab(metrics)
     with tab_data:
         explorer_tab(df)
 

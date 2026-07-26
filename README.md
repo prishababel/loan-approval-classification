@@ -1,55 +1,95 @@
-# 🏦 Loan Approval Classification
+# 🏦 Loan Approval Classification — Beyond the Credit Score
 
 End-to-end machine-learning project that predicts whether a loan application
 will be **approved or rejected**, trained on 45,000 applications, with an
-interactive **Streamlit** web app for live predictions.
+interactive **Streamlit** web app for live predictions and a fairness
+analysis.
 
-Based on the Kaggle notebook
-[prishababel/loan-approval-classification](https://www.kaggle.com/code/prishababel/loan-approval-classification),
-restructured into a clean, tested, deployable Python project.
+Restructured from the team notebook
+[prishababel/loan-approval-classification](https://www.kaggle.com/code/prishababel/loan-approval-classification)
+(*"Beyond the Credit Score"* — Prisha Babel, Chad Rampersad, Dedeepya
+Pidaparthi, Brocatto200, Nishat, Samuel Oyekan; Apache 2.0) into a clean,
+tested, deployable Python project — same methodology, packaged as a single
+scikit-learn pipeline, plus an implementation of the fairness analysis the
+notebook scopes out.
+
+## Methodology (from the team notebook)
+
+- **Cleaning:** drop implausible rows — age > 110, income > $1M, employment
+  experience ≥ age. No missing values or duplicates in the raw data.
+- **No leakage:** `loan_int_rate` is excluded from the features — the
+  interest rate is set *after* a loan is approved, so using it to predict
+  approval would leak the answer.
+- **Preprocessing:** standardize the 7 numeric features, one-hot encode the
+  5 categoricals (binary columns kept as single 0/1 columns), fit on the
+  training split only. Stratified 80/20 split, seed 42.
+- **Class imbalance:** only 22% of applications are approved, so the
+  Logistic Regression models use `class_weight="balanced"` and evaluation
+  leans on ROC-AUC / F1 rather than accuracy.
+- **Models:** class-weighted Logistic Regression baseline, a
+  GridSearchCV-tuned Logistic Regression (regularization strength + L1/L2,
+  scored on F1), and Random Forest / Hist Gradient Boosting as the
+  validation-and-comparison extension.
 
 ## Results
 
-Three classifiers are trained inside a shared preprocessing pipeline and
-compared on a stratified 20% hold-out set (8,998 loans):
+Stratified 20% hold-out set (8,995 loans):
 
 | Model | ROC-AUC | Accuracy | Precision | Recall | F1 |
 |---|---|---|---|---|---|
-| **Hist Gradient Boosting** (selected) | **0.9771** | 0.9320 | 0.8881 | 0.7940 | 0.8384 |
-| Random Forest | 0.9736 | 0.9275 | 0.9002 | 0.7580 | 0.8230 |
-| Logistic Regression | 0.9540 | 0.8976 | 0.7820 | 0.7480 | 0.7646 |
+| **Hist Gradient Boosting** (selected) | **0.9583** | 0.9002 | 0.8264 | 0.6975 | 0.7565 |
+| Random Forest | 0.9504 | 0.8938 | 0.8636 | 0.6205 | 0.7221 |
+| Logistic Regression (baseline) | 0.9310 | 0.8107 | 0.5443 | 0.9115 | 0.6816 |
+| Logistic Regression (tuned) | 0.9310 | 0.8103 | 0.5439 | 0.9105 | 0.6810 |
 
-The best pipeline (by ROC-AUC) is saved to `models/model.joblib` and the full
-report to `models/metrics.json` — both are committed so the app runs without a
-training step.
+The baseline reproduces the team notebook's reported numbers (ROC-AUC 0.931,
+F1 ≈ 0.68, recall ≈ 0.91 — the balanced class weights deliberately trade
+precision for recall on the approved class). The best pipeline by ROC-AUC is
+saved to `models/model.joblib`; the full report — including per-model ROC
+curves, the fairness report, and the demographics ablation — goes to
+`models/metrics.json`. Both are committed so the app runs without a training
+step.
+
+### Fairness (notebook section 12, implemented here)
+
+Group metrics on the hold-out set for the saved model:
+
+- **Gender:** near-parity — demographic-parity gap 1.4pp, equal-opportunity
+  gap 0.3pp.
+- **Age bands:** larger spread — equal-opportunity gap 11.5pp (approvable
+  under-25 applicants are approved 76% of the time vs. 64–68% for older
+  bands).
+- **Ablation:** retraining the tuned model *without* gender/age/education
+  changes every metric by ≤ 0.001 — decisions are driven by financial
+  features, dominated by `previous_loan_defaults_on_file` (no applicant with
+  a prior default is approved in this dataset).
 
 ## Dataset
 
 [Loan Approval Classification Dataset](https://www.kaggle.com/datasets/taweilo/loan-approval-classification-data)
 (Kaggle, taweilo) — 45,000 rows × 14 columns of synthetic credit-risk data
 (SMOTENC-enhanced from the original Credit Risk dataset). A copy ships in
-`data/loan_data.csv`.
+`data/loan_data.csv`. Target: `loan_status` — 1 = approved, 0 = rejected
+(22% approved).
 
-**Features:** age, gender, education, income, employment experience, home
-ownership, loan amount, loan intent, interest rate, loan-to-income ratio,
-credit-history length, credit score, previous defaults on file.
-**Target:** `loan_status` — 1 = approved, 0 = rejected (22% approved).
-
-Cleaning drops a handful of implausible rows (age > 90, employment
-experience > 60 years); the data has no missing values or duplicates.
+The notebook's cross-dataset consistency check (section 13.2) uses the
+original [Credit Risk Dataset](https://www.kaggle.com/datasets/laotse/credit-risk-dataset);
+it is not redistributed here — download `credit_risk_dataset.csv` from
+Kaggle into `data/` and the walkthrough notebook will pick it up.
 
 ## Project structure
 
 ```
-├── streamlit_app.py            # Streamlit app (predict, metrics, explorer)
+├── streamlit_app.py            # Streamlit app (predict, metrics, fairness, explorer)
 ├── loan_approval/              # Python package
-│   ├── config.py               #   paths, feature schema, constants
+│   ├── config.py               #   paths, feature schema, cleaning bounds
 │   ├── data.py                 #   loading + cleaning
-│   ├── train.py                #   train, compare, save best model
+│   ├── train.py                #   train, tune, compare, ablate, save best
+│   ├── fairness.py             #   group metrics by gender / age band
 │   └── evaluate.py             #   metrics helpers
 ├── data/loan_data.csv          # dataset (45,000 rows)
 ├── models/                     # trained pipeline + metrics report
-├── notebooks/                  # EDA + model-comparison walkthrough
+├── notebooks/                  # walkthrough mirroring the team notebook
 ├── tests/                      # pytest smoke tests
 └── requirements.txt
 ```
@@ -72,12 +112,15 @@ Then open http://localhost:8501. Run the tests with `pytest`.
 
 **Streamlit** ([streamlit.io](https://streamlit.io)) is an open-source Python
 framework that turns scripts into shareable web apps — no frontend code
-required. The app has three tabs:
+required. The app has four tabs:
 
 - **🔮 Predict** — enter an application (income, loan amount, credit score, …)
-  and get the approval probability from the trained model.
-- **📊 Model performance** — comparison table, ROC curves, and the confusion
-  matrix from the held-out test set.
+  and get the approval probability. No interest-rate input, by design (see
+  leakage note above).
+- **📊 Model performance** — comparison table, ROC curves, confusion matrix,
+  and the with/without-demographics ablation.
+- **⚖️ Fairness** — per-group approval rates, TPR/FPR, and disparity gaps by
+  gender and age band.
 - **🗂️ Data explorer** — dataset stats, feature distributions, and approval
   rates by category.
 
@@ -95,7 +138,9 @@ required. The app has three tabs:
 
 ## Acknowledgements
 
-- Original notebook: [prishababel on Kaggle](https://www.kaggle.com/code/prishababel/loan-approval-classification)
-- Dataset: [taweilo on Kaggle](https://www.kaggle.com/datasets/taweilo/loan-approval-classification-data)
+- Original team notebook: [*Beyond the Credit Score*](https://www.kaggle.com/code/prishababel/loan-approval-classification)
+  by Prisha Babel, Chad Rampersad, Dedeepya Pidaparthi, Brocatto200, Nishat,
+  and Samuel Oyekan (Apache 2.0).
+- Dataset: [taweilo on Kaggle](https://www.kaggle.com/datasets/taweilo/loan-approval-classification-data).
 
 *Educational project — not financial advice.*
